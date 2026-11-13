@@ -59,6 +59,7 @@ Now tap something. It should click instantly.
 | Two-finger quick tap | Right-click |
 | Two-finger scroll, pinch, swipes | Unchanged, handled by macOS |
 | Pressing the trackpad down (a physical click) | Unchanged, handled by macOS. The script never adds a second click |
+| Pressing the trackpad while a tap-drag is already in progress | Ignored. The drag continues until you lift your finger |
 
 ### Safeguards against interfering with macOS
 
@@ -67,6 +68,7 @@ Now tap something. It should click instantly.
 - **Scroll guard:** for 0.35 s after a two-finger gesture, one-finger taps are ignored, so lifting your fingers unevenly after a scroll doesn't click.
 - **Magic Mouse is skipped.** Only trackpads are used. Touching a Magic Mouse's surface never produces a click.
 - **No stuck button:** a drag interrupted by sleep, quitting or a second finger always releases the button.
+- **Press guard:** a real press during a tap-drag is intercepted, so it can't end or restart the drag. (Many people press down while dragging windows; without this, macOS sees two button-downs and drops the window when the pressure eases.)
 - **Only one copy runs at a time**, so clicks are never doubled by a duplicate process.
 
 ## Everyday commands
@@ -116,6 +118,9 @@ That's the palm guard. Wait a moment after typing, or lower `TYPING_COOLDOWN`.
 
 **A device is ignored or used by mistake.**
 Run `/usr/bin/python3 ~/.local/bin/instant_release.py --check` to list the devices the script found and their family IDs. Mice are skipped by family ID (`MOUSE_FAMILY_IDS`). Please open an issue if your device is classified wrong.
+
+**Tap-drag only starts sometimes.**
+The second touch has to land within 0.14 s of the tap, a quick tap-*tap* rhythm. Later than that, the touch is treated as moving the cursor, because that is exactly what "click something, then move the cursor" looks like. To drag a window without the rhythm, just press the trackpad and drag: that is native and also releases instantly.
 
 **Taps feel slow again.**
 **Use trackpad for dragging** is on. Turn it off.

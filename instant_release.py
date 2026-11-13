@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 log = logging.getLogger("instant_release")
 
@@ -118,6 +118,27 @@ cg.CGEventSetIntegerValueField.argtypes = [
 ]
 cg.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
 cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+cg.CGEventGetIntegerValueField.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+cg.CGEventGetIntegerValueField.restype = ctypes.c_int64
+TAP_CALLBACK_TYPE = ctypes.CFUNCTYPE(
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p
+)
+cg.CGEventTapCreate.argtypes = [
+    ctypes.c_uint32,
+    ctypes.c_uint32,
+    ctypes.c_uint32,
+    ctypes.c_uint64,
+    TAP_CALLBACK_TYPE,
+    ctypes.c_void_p,
+]
+cg.CGEventTapCreate.restype = ctypes.c_void_p
+cg.CGEventTapEnable.argtypes = [ctypes.c_void_p, ctypes.c_bool]
+cf.CFMachPortCreateRunLoopSource.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long]
+cf.CFMachPortCreateRunLoopSource.restype = ctypes.c_void_p
+cf.CFRunLoopGetCurrent.restype = ctypes.c_void_p
+cf.CFRunLoopAddSource.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+cf.CFRunLoopRun.argtypes = []
+kCFRunLoopCommonModes = ctypes.c_void_p.in_dll(cf, "kCFRunLoopCommonModes")
 cg.CGEventSourceButtonState.argtypes = [ctypes.c_int32, ctypes.c_uint32]
 cg.CGEventSourceButtonState.restype = ctypes.c_bool
 cg.CGEventSourceFlagsState.argtypes = [ctypes.c_int32]
@@ -167,6 +188,14 @@ kCGMouseButtonRight = 1
 kCGHIDEventTap = 0
 kCGEventSourceStateHIDSystemState = 1
 kCGMouseEventClickState = 1
+kCGEventSourceUserData = 42
+SYNTHETIC_TAG = 0x1E57A9  # marks events this script posts, so the press guard ignores them
+# Event tap (press guard)
+kCGSessionEventTap = 1
+kCGHeadInsertEventTap = 0
+kCGEventTapOptionDefault = 0
+kCGEventTapDisabledByTimeout = 0xFFFFFFFE
+kCGEventTapDisabledByUserInput = 0xFFFFFFFF
 kCGMouseEventDeltaX = 4
 kCGMouseEventDeltaY = 5
 # Shift | Control | Option | Command
@@ -199,6 +228,7 @@ def post_mouse_event(
     if not ev:
         return
     cg.CGEventSetIntegerValueField(ev, kCGMouseEventClickState, click_state)
+    cg.CGEventSetIntegerValueField(ev, kCGEventSourceUserData, SYNTHETIC_TAG)
     # Carry held modifier keys so Cmd/Shift/Option/Ctrl + tap work like a click.
     flags = cg.CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState)
     cg.CGEventSetFlags(ev, flags & MODIFIER_MASK)
@@ -540,6 +570,69 @@ def run_check():
     return 0 if trusted and trackpads else 1
 
 
+def any_drag_active():
+    with state_lock:
+        return any(g.is_dragging for g in gestures.values())
+
+
+class PressGuard:
+    """Event tap that swallows a real trackpad press (and its release) while a
+    synthetic tap-drag is in progress. Measured on a real user: when dragging a
+    window they often press the trackpad 80-150 ms after landing, i.e. after
+    the synthetic drag has already started. Without this, macOS sees two
+    button-downs and the real release ends the drag while the finger is still
+    down. Events this script posts are tagged and always pass through."""
+
+    def __init__(self):
+        self.port = None
+        self.swallow_up = False
+        self._callback_ref = TAP_CALLBACK_TYPE(self._callback)  # keep alive
+
+    def start(self):
+        mask = (1 << kCGEventLeftMouseDown) | (1 << kCGEventLeftMouseUp)
+        self.port = cg.CGEventTapCreate(
+            kCGSessionEventTap,
+            kCGHeadInsertEventTap,
+            kCGEventTapOptionDefault,
+            mask,
+            self._callback_ref,
+            None,
+        )
+        if not self.port:
+            log.warning("press guard unavailable (event tap could not be created)")
+            return False
+        threading.Thread(target=self._run, name="press-guard", daemon=True).start()
+        log.info("press guard active")
+        return True
+
+    def _run(self):
+        source = cf.CFMachPortCreateRunLoopSource(None, self.port, 0)
+        cf.CFRunLoopAddSource(cf.CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes)
+        cg.CGEventTapEnable(self.port, True)
+        cf.CFRunLoopRun()
+
+    def _callback(self, proxy, event_type, event, refcon):
+        try:
+            if event_type in (kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput):
+                cg.CGEventTapEnable(self.port, True)
+                return event
+            if cg.CGEventGetIntegerValueField(event, kCGEventSourceUserData) == SYNTHETIC_TAG:
+                return event  # one of ours
+            if event_type == kCGEventLeftMouseDown:
+                if any_drag_active():
+                    self.swallow_up = True
+                    log.debug("physical press during tap-drag swallowed")
+                    return None  # drop it
+                self.swallow_up = False  # a real down means any earlier press has ended
+            elif event_type == kCGEventLeftMouseUp and self.swallow_up:
+                self.swallow_up = False
+                log.debug("physical release swallowed")
+                return None
+        except Exception:
+            log.exception("error in press guard")
+        return event
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     parser.add_argument("--debug", action="store_true", help="log every gesture")
@@ -578,6 +671,9 @@ def main():
 
     log.info("instant_release %s started (pid %d)", __version__, os.getpid())
     start_devices()
+    press_guard = PressGuard()
+    if accessibility_trusted():
+        press_guard.start()
 
     # time.time() keeps counting while the Mac sleeps, so a big jump between
     # one-second ticks means we just woke up and the device handles are stale.
@@ -591,6 +687,8 @@ def main():
             start_devices()
         elif not active_devices:
             start_devices()
+        if press_guard.port is None and accessibility_trusted():
+            press_guard.start()
         last_tick = time.time()
 
 
