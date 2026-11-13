@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 log = logging.getLogger("instant_release")
 
@@ -36,13 +36,12 @@ TAP_MAX_CURSOR_MOVE = 6.0  # px the cursor may move during a tap
 TAP_MAX_FINGER_TRAVEL = 0.025  # glass travel allowed during a 1-finger tap
 DOUBLE_TAP_MAX_GAP = 0.38  # max time between taps for a double/triple click
 DOUBLE_TAP_MAX_SHIFT = 10.0  # px the cursor may move between those taps
-DRAG_ARM_WINDOW = 0.30  # touch within this long after a tap arms a drag
-# After a tap, the next touch is judged during its first DRAG_LANDING_TIME:
-# a finger that lands still (a double-tap motion) becomes a drag; a finger
-# that is already sliding when it lands is just moving the cursor.
-DRAG_LANDING_TIME = 0.06  # seconds of the landing that are inspected
-DRAG_LANDING_TRAVEL = 0.012  # glass travel (fraction of pad) allowed in that time
-DRAG_START_MOVE = 3.0  # px of movement after a still landing that starts the drag
+# Tap, then touch down again within DRAG_ARM_WINDOW -> that touch is a
+# tap-and-drag. Measured on a real trackpad: a deliberate double-tap-drag
+# lands 0.06-0.11 s after the tap; moving the cursor after a click lands
+# 0.17 s or later. 0.14 s sits between the two.
+DRAG_ARM_WINDOW = 0.14
+DRAG_START_MOVE = 3.0  # px of cursor movement that presses the button down
 MULTITOUCH_COOLDOWN = 0.35  # ignore 1-finger taps this long after 2+ fingers
 RIGHT_TAP_MAX_DURATION = 0.18  # longest 2-finger tap that right-clicks
 RIGHT_TAP_MAX_FINGER_TRAVEL = 0.015  # glass travel allowed for 2-finger tap
@@ -271,7 +270,6 @@ class Gestures:
         self.touch_start_time = 0.0
         self.touch_start_pos = None
         self.drag_start_pos = None
-        self.drag_ready = False  # tap-drag landed still; waiting for movement
         self.finger_start = {}
         self.max_travel = 0.0
         self.physical_click = False  # trackpad was pressed during this touch
@@ -349,22 +347,10 @@ class Gestures:
         elif self.max_fingers == 1:
             if self.drag_start_pos is not None and not self.is_dragging:
                 elapsed = now - self.touch_start_time
-                if not self.drag_ready:
-                    if self.max_travel > DRAG_LANDING_TRAVEL:
-                        # Finger was already sliding as it landed: someone
-                        # moving the cursor right after a click, not a drag.
-                        self.drag_start_pos = None
-                        log.debug(
-                            "no drag: sliding on landing (travel %.3f in %.0f ms)",
-                            self.max_travel,
-                            elapsed * 1000,
-                        )
-                    elif elapsed >= DRAG_LANDING_TIME:
-                        self.drag_ready = True
-                # Landed still. Press the button once the finger actually
-                # moves, or is held longer than a tap; lifting before that
-                # is the second tap of a double-click.
-                if self.drag_ready and (
+                # Press the button once the finger actually moves, or is held
+                # longer than a tap; lifting before that is the second tap of
+                # a double-click.
+                if (
                     distance(get_cursor_pos(), self.drag_start_pos) > DRAG_START_MOVE
                     or elapsed > TAP_MAX_DURATION
                 ):
