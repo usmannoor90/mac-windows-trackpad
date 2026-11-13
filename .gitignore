@@ -22,3 +22,9 @@ venv/
 .claude/
 .vexp/
 CLAUDE.md
+
+# Build output
+dist/
+.build/
+App/.build/
+.swiftpm/

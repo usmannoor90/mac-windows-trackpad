@@ -4,7 +4,7 @@
 set -euo pipefail
 
 LABEL="com.user.instantrelease"
-SCRIPT_SRC="$(cd "$(dirname "$0")" && pwd)/instant_release.py"
+SCRIPT_SRC="$(cd "$(dirname "$0")" && pwd)/instant_release.py"  # legacy/
 INSTALL_DIR="$HOME/.local/bin"
 SCRIPT_DST="$INSTALL_DIR/instant_release.py"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
