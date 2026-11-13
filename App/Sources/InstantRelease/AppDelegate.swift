@@ -34,7 +34,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        offerToRemoveLegacyScript()
         requestAccessibility()
 
         // Sleep/wake: the trackpad handle goes stale, so reattach after wake.
@@ -57,6 +56,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         startIfReady()
+
+        // Ask after everything is running, so the dialog never blocks startup.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.offerToRemoveLegacyScript()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

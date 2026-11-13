@@ -46,6 +46,7 @@ if [[ "${1:-}" == "--install" ]]; then
     bold "Installing to /Applications"
     osascript -e 'quit app "Instant Release"' 2>/dev/null || true
     sleep 1
+    pkill -x InstantRelease 2>/dev/null || true  # in case a dialog kept it open
     rm -rf "/Applications/$APP_NAME.app"
     cp -R "$APP" "/Applications/$APP_NAME.app"
     open "/Applications/$APP_NAME.app"

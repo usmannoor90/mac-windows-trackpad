@@ -34,6 +34,7 @@ ditto -x -k "$TMP/app.zip" "$TMP"
 echo "Installing to $DEST..."
 osascript -e 'quit app "Instant Release"' 2>/dev/null || true
 sleep 1
+pkill -x InstantRelease 2>/dev/null || true
 rm -rf "$DEST"
 mv "$TMP/$APP" "$DEST"
 xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
