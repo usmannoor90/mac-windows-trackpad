@@ -6,7 +6,7 @@ Reads raw finger frames from Apple's private MultitouchSupport framework and
 posts mouse events through CoreGraphics. Pure ctypes, no third-party packages.
 
   * one-finger tap        -> instant left click (no double-tap wait)
-  * tap twice             -> double-click
+  * tap twice / 3 times   -> double / triple click
   * tap, then touch+move  -> tap-and-drag, released the instant you lift
   * two-finger tap        -> right click
 
@@ -21,10 +21,10 @@ import logging
 import os
 import signal
 import sys
-import tempfile
+import threading
 import time
 
-__version__ = "1.1.0"
+__version__ = "1.4.0"
 
 log = logging.getLogger("instant_release")
 
@@ -34,16 +34,27 @@ log = logging.getLogger("instant_release")
 TAP_MAX_DURATION = 0.22  # longest touch that still counts as a 1-finger tap
 TAP_MAX_CURSOR_MOVE = 6.0  # px the cursor may move during a tap
 TAP_MAX_FINGER_TRAVEL = 0.025  # glass travel allowed during a 1-finger tap
-DOUBLE_TAP_MAX_GAP = 0.38  # max time between taps for a double-click
-DOUBLE_TAP_MAX_SHIFT = 10.0  # px the cursor may move between the two taps
+DOUBLE_TAP_MAX_GAP = 0.38  # max time between taps for a double/triple click
+DOUBLE_TAP_MAX_SHIFT = 10.0  # px the cursor may move between those taps
 DRAG_ARM_WINDOW = 0.30  # touch within this long after a tap arms a drag
-DRAG_START_MOVE = 3.0  # px of movement that starts the drag...
-DRAG_START_HOLD = 0.13  # ...or holding this long starts it
+# After a tap, the next touch is judged during its first DRAG_LANDING_TIME:
+# a finger that lands still (a double-tap motion) becomes a drag; a finger
+# that is already sliding when it lands is just moving the cursor.
+DRAG_LANDING_TIME = 0.06  # seconds of the landing that are inspected
+DRAG_LANDING_TRAVEL = 0.012  # glass travel (fraction of pad) allowed in that time
+DRAG_START_MOVE = 3.0  # px of movement after a still landing that starts the drag
 MULTITOUCH_COOLDOWN = 0.35  # ignore 1-finger taps this long after 2+ fingers
 RIGHT_TAP_MAX_DURATION = 0.18  # longest 2-finger tap that right-clicks
 RIGHT_TAP_MAX_FINGER_TRAVEL = 0.015  # glass travel allowed for 2-finger tap
+TYPING_COOLDOWN = 0.30  # ignore taps this soon after a key press (palm guard)
 WAKE_GAP = 3.0  # main-loop clock jump that means "woke from sleep"
 DEVICE_WAIT_SECONDS = 30  # how long to wait for trackpad hardware per attempt
+
+# Multitouch devices that are mice, not trackpads. Touching a Magic Mouse
+# must never produce clicks.
+MOUSE_FAMILY_IDS = {112, 113}
+
+LOCK_PATH = os.path.expanduser("~/Library/Caches/instant_release.lock")
 
 # ---------------------------------------------------------------------------
 # Frameworks
@@ -106,7 +117,14 @@ cg.CGEventSetIntegerValueField.argtypes = [
     ctypes.c_uint32,
     ctypes.c_int64,
 ]
+cg.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
 cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+cg.CGEventSourceButtonState.argtypes = [ctypes.c_int32, ctypes.c_uint32]
+cg.CGEventSourceButtonState.restype = ctypes.c_bool
+cg.CGEventSourceFlagsState.argtypes = [ctypes.c_int32]
+cg.CGEventSourceFlagsState.restype = ctypes.c_uint64
+cg.CGEventSourceSecondsSinceLastEventType.argtypes = [ctypes.c_int32, ctypes.c_uint32]
+cg.CGEventSourceSecondsSinceLastEventType.restype = ctypes.c_double
 
 cf.CFRelease.argtypes = [ctypes.c_void_p]
 cf.CFArrayGetCount.argtypes = [ctypes.c_void_p]
@@ -135,16 +153,25 @@ multitouch.MTUnregisterContactFrameCallback.argtypes = [
 ]
 multitouch.MTDeviceStart.argtypes = [ctypes.c_void_p, ctypes.c_int]
 multitouch.MTDeviceStop.argtypes = [ctypes.c_void_p]
+multitouch.MTDeviceGetFamilyID.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+multitouch.MTDeviceIsBuiltIn.argtypes = [ctypes.c_void_p]
+multitouch.MTDeviceIsBuiltIn.restype = ctypes.c_bool
 
 kCGEventLeftMouseDown = 1
 kCGEventLeftMouseUp = 2
 kCGEventRightMouseDown = 3
 kCGEventRightMouseUp = 4
 kCGEventLeftMouseDragged = 6
+kCGEventKeyDown = 10
 kCGMouseButtonLeft = 0
 kCGMouseButtonRight = 1
 kCGHIDEventTap = 0
+kCGEventSourceStateHIDSystemState = 1
 kCGMouseEventClickState = 1
+kCGMouseEventDeltaX = 4
+kCGMouseEventDeltaY = 5
+# Shift | Control | Option | Command
+MODIFIER_MASK = 0x00020000 | 0x00040000 | 0x00080000 | 0x00100000
 
 CALLBACK_TYPE = ctypes.CFUNCTYPE(
     ctypes.c_int,
@@ -166,13 +193,36 @@ def get_cursor_pos():
     return loc
 
 
-def post_mouse_event(event_type, loc, button=kCGMouseButtonLeft, click_state=1):
+def post_mouse_event(
+    event_type, loc, button=kCGMouseButtonLeft, click_state=1, delta=None
+):
     ev = cg.CGEventCreateMouseEvent(None, event_type, loc, button)
     if not ev:
         return
     cg.CGEventSetIntegerValueField(ev, kCGMouseEventClickState, click_state)
+    # Carry held modifier keys so Cmd/Shift/Option/Ctrl + tap work like a click.
+    flags = cg.CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState)
+    cg.CGEventSetFlags(ev, flags & MODIFIER_MASK)
+    if delta is not None:
+        cg.CGEventSetIntegerValueField(ev, kCGMouseEventDeltaX, round(delta[0]))
+        cg.CGEventSetIntegerValueField(ev, kCGMouseEventDeltaY, round(delta[1]))
     cg.CGEventPost(kCGHIDEventTap, ev)
     cf.CFRelease(ev)
+
+
+def physical_button_down():
+    """True while the trackpad is physically pressed (a real click)."""
+    return cg.CGEventSourceButtonState(
+        kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft
+    ) or cg.CGEventSourceButtonState(
+        kCGEventSourceStateHIDSystemState, kCGMouseButtonRight
+    )
+
+
+def seconds_since_keypress():
+    return cg.CGEventSourceSecondsSinceLastEventType(
+        kCGEventSourceStateHIDSystemState, kCGEventKeyDown
+    )
 
 
 def distance(a, b):
@@ -203,14 +253,16 @@ def accessibility_trusted(prompt=False):
 
 
 # ---------------------------------------------------------------------------
-# Gesture state machine
+# Gesture state machine (one instance per trackpad)
 # ---------------------------------------------------------------------------
 class Gestures:
     def __init__(self):
         self.last_tap_up_time = 0.0
         self.last_tap_pos = None
+        self.click_count = 0
         self.last_multitouch_time = 0.0
         self.is_dragging = False
+        self.last_drag_pos = None
         self.reset_touch()
 
     def reset_touch(self):
@@ -219,8 +271,16 @@ class Gestures:
         self.touch_start_time = 0.0
         self.touch_start_pos = None
         self.drag_start_pos = None
+        self.drag_ready = False  # tap-drag landed still; waiting for movement
         self.finger_start = {}
         self.max_travel = 0.0
+        self.physical_click = False  # trackpad was pressed during this touch
+        self.typing = False  # touch began right after a key press
+
+    def forget_taps(self):
+        self.last_tap_up_time = 0.0
+        self.last_tap_pos = None
+        self.click_count = 0
 
     def release_drag(self):
         """Never leave the left button stuck down."""
@@ -241,6 +301,12 @@ class Gestures:
                 self._touch_began(n_fingers, now)
             else:
                 self._touch_moved(n_fingers, now)
+            # A real press is handled entirely by macOS; we must not add a
+            # second click (that would toggle checkboxes twice, etc.).
+            if not self.is_dragging and not self.physical_click and physical_button_down():
+                self.physical_click = True
+                self.drag_start_pos = None
+                log.debug("physical click, leaving it to macOS")
         elif self.touching:
             self._touch_ended(now)
 
@@ -261,8 +327,11 @@ class Gestures:
         self.max_fingers = n_fingers
         self.touch_start_time = now
         self.touch_start_pos = get_cursor_pos()
+        self.typing = seconds_since_keypress() < TYPING_COOLDOWN
         if (
             n_fingers == 1
+            and self.click_count == 1  # no drag right after a double-click
+            and not self.typing
             and (now - self.last_tap_up_time) < DRAG_ARM_WINDOW
             and (now - self.last_multitouch_time) > MULTITOUCH_COOLDOWN
         ):
@@ -276,19 +345,38 @@ class Gestures:
             self.last_multitouch_time = now
             self.release_drag()
             self.drag_start_pos = None
-            self.last_tap_up_time = 0.0
+            self.forget_taps()
         elif self.max_fingers == 1:
             if self.drag_start_pos is not None and not self.is_dragging:
-                moved = distance(get_cursor_pos(), self.drag_start_pos)
-                if (
-                    moved > DRAG_START_MOVE
-                    or (now - self.touch_start_time) > DRAG_START_HOLD
+                elapsed = now - self.touch_start_time
+                if not self.drag_ready:
+                    if self.max_travel > DRAG_LANDING_TRAVEL:
+                        # Finger was already sliding as it landed: someone
+                        # moving the cursor right after a click, not a drag.
+                        self.drag_start_pos = None
+                        log.debug(
+                            "no drag: sliding on landing (travel %.3f in %.0f ms)",
+                            self.max_travel,
+                            elapsed * 1000,
+                        )
+                    elif elapsed >= DRAG_LANDING_TIME:
+                        self.drag_ready = True
+                # Landed still. Press the button once the finger actually
+                # moves, or is held longer than a tap; lifting before that
+                # is the second tap of a double-click.
+                if self.drag_ready and (
+                    distance(get_cursor_pos(), self.drag_start_pos) > DRAG_START_MOVE
+                    or elapsed > TAP_MAX_DURATION
                 ):
                     self.is_dragging = True
+                    self.last_drag_pos = self.drag_start_pos
                     post_mouse_event(kCGEventLeftMouseDown, self.drag_start_pos)
-                    log.debug("drag started")
+                    log.debug("drag started (%.0f ms after landing)", elapsed * 1000)
             if self.is_dragging:
-                post_mouse_event(kCGEventLeftMouseDragged, get_cursor_pos())
+                cur = get_cursor_pos()
+                delta = (cur.x - self.last_drag_pos.x, cur.y - self.last_drag_pos.y)
+                self.last_drag_pos = cur
+                post_mouse_event(kCGEventLeftMouseDragged, cur, delta=delta)
 
     def _touch_ended(self, now):
         cur = get_cursor_pos()
@@ -299,9 +387,13 @@ class Gestures:
             # The whole point: release the instant the last finger lifts.
             post_mouse_event(kCGEventLeftMouseUp, cur)
             self.is_dragging = False
-            self.last_tap_up_time = 0.0
-            self.last_tap_pos = None
+            self.forget_taps()
             log.debug("drag ended")
+
+        elif self.physical_click or self.typing:
+            self.forget_taps()
+            if self.typing:
+                log.debug("touch ignored: typing")
 
         elif (
             self.max_fingers == 1
@@ -313,17 +405,16 @@ class Gestures:
             gap = now - self.last_tap_up_time
             shift = distance(cur, self.last_tap_pos) if self.last_tap_pos else 999.0
             if gap < DOUBLE_TAP_MAX_GAP and shift < DOUBLE_TAP_MAX_SHIFT:
-                post_mouse_event(kCGEventLeftMouseDown, self.last_tap_pos, click_state=2)
-                post_mouse_event(kCGEventLeftMouseUp, self.last_tap_pos, click_state=2)
-                self.last_tap_up_time = 0.0
-                self.last_tap_pos = None
-                log.debug("double tap")
+                self.click_count += 1  # double, triple, ... at the same spot
+                pos = self.last_tap_pos
             else:
-                post_mouse_event(kCGEventLeftMouseDown, cur)
-                post_mouse_event(kCGEventLeftMouseUp, cur)
-                self.last_tap_up_time = now
-                self.last_tap_pos = cur
-                log.debug("tap (%.0f ms)", duration * 1000)
+                self.click_count = 1
+                pos = cur
+            post_mouse_event(kCGEventLeftMouseDown, pos, click_state=self.click_count)
+            post_mouse_event(kCGEventLeftMouseUp, pos, click_state=self.click_count)
+            self.last_tap_up_time = now
+            self.last_tap_pos = pos
+            log.debug("tap x%d (%.0f ms)", self.click_count, duration * 1000)
 
         elif (
             self.max_fingers == 2
@@ -333,25 +424,29 @@ class Gestures:
             post_mouse_event(kCGEventRightMouseDown, cur, kCGMouseButtonRight)
             post_mouse_event(kCGEventRightMouseUp, cur, kCGMouseButtonRight)
             self.last_multitouch_time = now
-            self.last_tap_up_time = 0.0
-            self.last_tap_pos = None
+            self.forget_taps()
             log.debug("right click")
 
         else:
             if self.max_fingers > 1:
                 self.last_multitouch_time = now
-            self.last_tap_up_time = 0.0
-            self.last_tap_pos = None
+            self.forget_taps()
 
         self.reset_touch()
 
 
-gestures = Gestures()
+# device pointer -> Gestures. Each trackpad gets its own state so two
+# trackpads (built-in + Magic Trackpad) can't confuse each other.
+gestures = {}
+state_lock = threading.RLock()  # re-entrant: the SIGTERM handler may run while held
 
 
 def _touch_callback(device, fingers_ptr, n_fingers, timestamp, frame):
     try:
-        gestures.on_frame(fingers_ptr, n_fingers)
+        with state_lock:
+            g = gestures.get(device)
+            if g is not None:
+                g.on_frame(fingers_ptr, n_fingers)
     except Exception:  # an exception must never escape into the C callback
         log.exception("error in touch callback")
     return 0
@@ -367,6 +462,20 @@ c_callback = CALLBACK_TYPE(_touch_callback)
 active_devices = []
 
 
+def describe_device(dev):
+    family = ctypes.c_int(0)
+    multitouch.MTDeviceGetFamilyID(dev, ctypes.byref(family))
+    builtin = bool(multitouch.MTDeviceIsBuiltIn(dev))
+    is_mouse = family.value in MOUSE_FAMILY_IDS
+    return family.value, builtin, is_mouse
+
+
+def list_devices():
+    device_list = multitouch.MTDeviceCreateList()
+    count = cf.CFArrayGetCount(device_list) if device_list else 0
+    return [cf.CFArrayGetValueAtIndex(device_list, i) for i in range(count)]
+
+
 def stop_devices():
     for dev in active_devices:
         try:
@@ -375,24 +484,32 @@ def stop_devices():
         except Exception:
             pass
     del active_devices[:]
+    with state_lock:
+        for g in gestures.values():
+            g.reset()
+        gestures.clear()
 
 
 def start_devices():
-    """(Re)attach to every multitouch device. Waits for the hardware to show
-    up (it can be late at boot or after wake)."""
+    """(Re)attach to every trackpad. Waits for the hardware to show up (it can
+    be late at boot or after wake)."""
     stop_devices()
-    gestures.reset()
     for _ in range(DEVICE_WAIT_SECONDS):
-        device_list = multitouch.MTDeviceCreateList()
-        count = cf.CFArrayGetCount(device_list) if device_list else 0
-        if count > 0:
-            for i in range(count):
-                dev = cf.CFArrayGetValueAtIndex(device_list, i)
+        devices = list_devices()
+        if devices:
+            for dev in devices:
+                family, builtin, is_mouse = describe_device(dev)
+                kind = "built-in" if builtin else "external"
+                if is_mouse:
+                    log.info("skipping mouse (family %d)", family)
+                    continue
+                with state_lock:
+                    gestures[dev] = Gestures()
                 multitouch.MTRegisterContactFrameCallback(dev, c_callback)
                 multitouch.MTDeviceStart(dev, 0)
                 active_devices.append(dev)
-            log.info("attached to %d multitouch device(s)", count)
-            return True
+                log.info("attached to %s trackpad (family %d)", kind, family)
+            return bool(active_devices)
         time.sleep(1)
     log.warning("no multitouch device found after %ds", DEVICE_WAIT_SECONDS)
     return False
@@ -400,11 +517,12 @@ def start_devices():
 
 def acquire_single_instance_lock():
     """Two copies would double every click, so refuse to start a second one."""
-    path = os.path.join(tempfile.gettempdir(), "instant_release.lock")
-    fh = open(path, "w")
+    os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
+    fh = open(LOCK_PATH, "w")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
+        fh.close()
         return None
     fh.write(str(os.getpid()))
     fh.flush()
@@ -413,9 +531,27 @@ def acquire_single_instance_lock():
 
 def shutdown(signum=None, frame=None):
     log.info("shutting down")
-    gestures.reset()
     stop_devices()
     sys.exit(0)
+
+
+def run_check():
+    trusted = accessibility_trusted(prompt=False)
+    print("version:       %s" % __version__)
+    print("python:        %s" % os.path.realpath(sys.executable))
+    print("accessibility: %s" % ("granted" if trusted else "NOT granted"))
+    trackpads = 0
+    for dev in list_devices():
+        family, builtin, is_mouse = describe_device(dev)
+        if is_mouse:
+            what = "mouse (ignored)"
+        else:
+            what = "built-in trackpad" if builtin else "external trackpad"
+            trackpads += 1
+        print("device:        %s, family %d" % (what, family))
+    if not trackpads:
+        print("device:        no trackpad found")
+    return 0 if trusted and trackpads else 1
 
 
 def main():
@@ -424,7 +560,7 @@ def main():
     parser.add_argument(
         "--check",
         action="store_true",
-        help="check Accessibility permission and trackpad, then exit",
+        help="check Accessibility permission and trackpads, then exit",
     )
     parser.add_argument("--version", action="version", version=__version__)
     args = parser.parse_args()
@@ -436,15 +572,9 @@ def main():
     )
 
     if args.check:
-        trusted = accessibility_trusted(prompt=False)
-        device_list = multitouch.MTDeviceCreateList()
-        count = cf.CFArrayGetCount(device_list) if device_list else 0
-        print("python:        %s" % os.path.realpath(sys.executable))
-        print("accessibility: %s" % ("granted" if trusted else "NOT granted"))
-        print("trackpads:     %d multitouch device(s)" % count)
-        sys.exit(0 if trusted and count else 1)
+        sys.exit(run_check())
 
-    lock = acquire_single_instance_lock()
+    lock = acquire_single_instance_lock()  # held for the life of the process
     if lock is None:
         log.error("another instance is already running; exiting")
         sys.exit(1)

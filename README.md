@@ -52,11 +52,22 @@ Now tap something. It should click instantly.
 | You do | You get |
 |---|---|
 | One-finger quick tap | Left click, instantly |
-| Two quick taps in the same spot | Double-click (selects a word) |
-| Tap, then touch again and move | Drag. Lifting your finger drops it immediately |
-| Tap, then touch and hold | Drag (for example, to start a text selection) |
+| Two / three quick taps in the same spot | Double-click (selects a word) / triple-click (selects a line or paragraph) |
+| Hold ⌘ / ⇧ / ⌥ / ⌃ while tapping | Same as ⌘-click, ⇧-click, and so on (for example, ⌘-tap opens a link in a new tab) |
+| Double-tap and drag: tap, then put your finger straight down and slide | Drag. Lifting your finger drops it immediately |
+| Tap, then slide your finger as it lands | Just moves the cursor. Nothing is dragged, so working fast after a click is safe |
 | Two-finger quick tap | Right-click |
 | Two-finger scroll, pinch, swipes | Unchanged, handled by macOS |
+| Pressing the trackpad down (a physical click) | Unchanged, handled by macOS. The script never adds a second click |
+
+### Safeguards against interfering with macOS
+
+- **Physical clicks are left alone.** If the trackpad is pressed during a touch, the script does nothing, so a click never counts twice (a checkbox won't toggle on and back off).
+- **Palm guard:** taps within 0.3 s of a key press are ignored, so resting your palm while typing doesn't move the text cursor.
+- **Scroll guard:** for 0.35 s after a two-finger gesture, one-finger taps are ignored, so lifting your fingers unevenly after a scroll doesn't click.
+- **Magic Mouse is skipped.** Only trackpads are used. Touching a Magic Mouse's surface never produces a click.
+- **No stuck button:** a drag interrupted by sleep, quitting or a second finger always releases the button.
+- **Only one copy runs at a time**, so clicks are never doubled by a duplicate process.
 
 ## Everyday commands
 
@@ -100,6 +111,12 @@ Python doesn't have Accessibility permission. Check step 2, then restart the scr
 **Every tap is a double-click, or text gets selected by accident.**
 macOS **Tap to click** is still on, so each tap clicks twice. Turn it off.
 
+**A tap right after typing doesn't click.**
+That's the palm guard. Wait a moment after typing, or lower `TYPING_COOLDOWN`.
+
+**A device is ignored or used by mistake.**
+Run `/usr/bin/python3 ~/.local/bin/instant_release.py --check` to list the devices the script found and their family IDs. Mice are skipped by family ID (`MOUSE_FAMILY_IDS`). Please open an issue if your device is classified wrong.
+
 **Taps feel slow again.**
 **Use trackpad for dragging** is on. Turn it off.
 
@@ -125,8 +142,10 @@ All the timing and distance values are constants near the top of [instant_releas
 | `TAP_MAX_FINGER_TRAVEL` | 0.025 | How far a finger may slide during a tap (fraction of the pad) |
 | `DOUBLE_TAP_MAX_GAP` | 0.38 s | Longest gap between the two taps of a double-click |
 | `DRAG_ARM_WINDOW` | 0.30 s | How soon after a tap you must touch again to start a drag |
-| `DRAG_START_HOLD` | 0.13 s | Holding this long (or moving 3 px) starts the drag |
+| `DRAG_LANDING_TIME` | 0.06 s | After a tap, how much of the next touch's landing is inspected |
+| `DRAG_LANDING_TRAVEL` | 0.012 | How far the finger may slide during that landing and still start a drag. Raise it if drags get missed; lower it if the cursor moves start dragging things |
 | `MULTITOUCH_COOLDOWN` | 0.35 s | Taps are ignored this long after a scroll or other two-finger gesture |
+| `TYPING_COOLDOWN` | 0.30 s | Taps are ignored this long after a key press (palm guard) |
 | `RIGHT_TAP_MAX_DURATION` | 0.18 s | Longest two-finger touch that still right-clicks |
 
 After editing, run `./install.sh` again.
@@ -137,7 +156,7 @@ After editing, run `./install.sh` again.
 - **Gesture state machine:** each touch is tracked from first contact until all fingers lift. It's classified by finger count, how long it lasted, and how far the fingers and cursor moved: tap, double-tap, drag, right-click, or "not ours".
 - **Synthetic clicks:** `CGEventPost` sends left/right mouse down, up and drag events. For double-clicks it also sets the click count, so word selection works.
 - **Sleep/wake:** the main loop ticks once a second. A jump of more than 3 s in the clock means the Mac slept, so the script reconnects to the trackpad.
-- **Safety:** if a drag is interrupted (by sleep, exit or a second finger), the button is released so it never stays stuck down.
+- **Coexisting with macOS:** physical presses (button state from the HID system), recent key presses and multi-finger gestures all turn off synthetic taps. Held modifier keys are copied onto every synthetic click. Each trackpad has its own gesture state.
 - **Startup:** a `launchd` LaunchAgent starts the script at login and restarts it if it crashes. At boot it waits up to 30 s for the trackpad to appear.
 
 Everything is called through `ctypes`, so there's nothing to compile. That was deliberate: `pyobjc` failed to build on some setups.
