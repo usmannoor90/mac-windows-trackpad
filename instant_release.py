@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 log = logging.getLogger("instant_release")
 
@@ -37,10 +37,12 @@ TAP_MAX_FINGER_TRAVEL = 0.025  # glass travel allowed during a 1-finger tap
 DOUBLE_TAP_MAX_GAP = 0.38  # max time between taps for a double/triple click
 DOUBLE_TAP_MAX_SHIFT = 10.0  # px the cursor may move between those taps
 # Tap, then touch down again within DRAG_ARM_WINDOW -> that touch is a
-# tap-and-drag. Measured on a real trackpad: a deliberate double-tap-drag
-# lands 0.06-0.11 s after the tap; moving the cursor after a click lands
-# 0.17 s or later. 0.14 s sits between the two.
-DRAG_ARM_WINDOW = 0.14
+# tap-and-drag (Windows 10 style: any rhythm inside the double-click time).
+# Trade-off: tapping something and moving the cursor within this window drags
+# it. Lower to ~0.14 to only accept a quick tap-tap rhythm and never drag by
+# accident (measured: tap-tap-drags land 0.06-0.46 s after the tap, cursor
+# moves after a click land 0.17-0.39 s after it).
+DRAG_ARM_WINDOW = 0.45
 DRAG_START_MOVE = 3.0  # px of cursor movement that presses the button down
 MULTITOUCH_COOLDOWN = 0.35  # ignore 1-finger taps this long after 2+ fingers
 RIGHT_TAP_MAX_DURATION = 0.18  # longest 2-finger tap that right-clicks
