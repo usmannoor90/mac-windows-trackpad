@@ -54,8 +54,9 @@ Now tap something. It should click instantly.
 | One-finger quick tap | Left click, instantly |
 | Two / three quick taps in the same spot | Double-click (selects a word) / triple-click (selects a line or paragraph) |
 | Hold ⌘ / ⇧ / ⌥ / ⌃ while tapping | Same as ⌘-click, ⇧-click, and so on (for example, ⌘-tap opens a link in a new tab) |
-| Tap, then put your finger back down within half a second and slide (Windows 10 style) | Drag. Lifting your finger drops it immediately |
-| Tap, then touch again more than half a second later | Just moves the cursor |
+| Tap, then put your finger back down **right away** (within 0.14 s, a quick tap-tap rhythm) and slide | Drag. Lifting your finger drops it immediately |
+| Press the trackpad down and move | Drag, handled by macOS, also released instantly |
+| Tap, then touch again a little later (0.17 s or more) and move | Just moves the cursor. Nothing is dragged, so tapping a chess piece or a tab and then moving the cursor is always safe |
 | Two-finger quick tap | Right-click |
 | Two-finger scroll, pinch, swipes | Unchanged, handled by macOS |
 | Pressing the trackpad down (a physical click) | Unchanged, handled by macOS. The script never adds a second click |
@@ -119,8 +120,8 @@ That's the palm guard. Wait a moment after typing, or lower `TYPING_COOLDOWN`.
 **A device is ignored or used by mistake.**
 Run `/usr/bin/python3 ~/.local/bin/instant_release.py --check` to list the devices the script found and their family IDs. Mice are skipped by family ID (`MOUSE_FAMILY_IDS`). Please open an issue if your device is classified wrong.
 
-**I tapped something, moved the cursor, and it got dragged.**
-That is the flip side of Windows-style tap-drag: a touch within half a second of a tap counts as a drag, and "tap, then move the cursor" is the same motion. Wait a beat after tapping before moving, or lower `DRAG_ARM_WINDOW` (see Tuning) so only a quick tap-tap rhythm drags.
+**Tap-drag only starts sometimes.**
+The second touch has to land within 0.14 s of the tap, a quick tap-*tap* rhythm. Later than that, the touch is treated as moving the cursor, because that is exactly what "tap something, then move the cursor" looks like and the two can't be told apart. To drag without the rhythm, press the trackpad down and drag: native, and also released instantly.
 
 **Taps feel slow again.**
 **Use trackpad for dragging** is on. Turn it off.
@@ -146,7 +147,7 @@ All the timing and distance values are constants near the top of [instant_releas
 | `TAP_MAX_DURATION` | 0.22 s | Longest touch that still counts as a tap |
 | `TAP_MAX_FINGER_TRAVEL` | 0.025 | How far a finger may slide during a tap (fraction of the pad) |
 | `DOUBLE_TAP_MAX_GAP` | 0.38 s | Longest gap between the two taps of a double-click |
-| `DRAG_ARM_WINDOW` | 0.45 s | How soon after a tap the finger must come back down to start a drag. Windows-like. Lower it to about 0.14 if you find things getting dragged when you tap something and move the cursor right away; then only a quick tap-tap rhythm drags |
+| `DRAG_ARM_WINDOW` | 0.14 s | How soon after a tap the finger must come back down to start a drag. Measured: quick tap-tap-drags land within 0.06–0.11 s, cursor moves after a click land after 0.17 s. Raise it towards 0.45 for Windows-style any-rhythm drags, at the cost of dragging things when you tap them and move the cursor right away |
 | `MULTITOUCH_COOLDOWN` | 0.35 s | Taps are ignored this long after a scroll or other two-finger gesture |
 | `TYPING_COOLDOWN` | 0.30 s | Taps are ignored this long after a key press (palm guard) |
 | `RIGHT_TAP_MAX_DURATION` | 0.18 s | Longest two-finger touch that still right-clicks |
