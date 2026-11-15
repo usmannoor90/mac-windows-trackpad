@@ -146,13 +146,13 @@ All the timing and distance values are constants near the top of [instant_releas
 
 | Constant | Default | Meaning |
 |---|---|---|
-| `TAP_MAX_DURATION` | 0.22 s | Longest touch that still counts as a tap |
-| `TAP_MAX_FINGER_TRAVEL` | 0.025 | How far a finger may slide during a tap (fraction of the pad) |
+| `TAP_MAX_DURATION` | 0.30 s | Longest touch that still counts as a tap |
+| `TAP_MAX_FINGER_TRAVEL` | 0.08 | How far a finger may slide during a tap (fraction of the pad). The cursor must not move either, which is the stricter test |
 | `DOUBLE_TAP_MAX_GAP` | 0.38 s | Longest gap between the two taps of a double-click |
 | `DRAG_ARM_WINDOW` | 0.14 s | How soon after a tap the finger must come back down to start a drag. Measured: quick tap-tap-drags land within 0.06–0.11 s, cursor moves after a click land after 0.17 s. Raise it towards 0.45 for Windows-style any-rhythm drags, at the cost of dragging things when you tap them and move the cursor right away |
 | `MULTITOUCH_COOLDOWN` | 0.35 s | Taps are ignored this long after a scroll or other two-finger gesture |
 | `TYPING_COOLDOWN` | 0.30 s | Taps are ignored this long after a key press (palm guard) |
-| `DOUBLE_TAP_MAX_FINGER_TRAVEL` | 0.08 | How far the finger may slide during the second tap of a double-tap (the cursor must still not move) |
+| `DOUBLE_TAP_MAX_FINGER_TRAVEL` | 0.10 | How far the finger may slide during the second tap of a double-tap (the cursor must still not move) |
 | `MULTI_MIN_FRAMES` | 3 | Frames (8 ms each) with two contacts before a touch counts as two-finger; filters phantom contacts |
 | `RIGHT_TAP_MAX_DURATION` | 0.25 s | Longest two-finger touch that still right-clicks |
 | `RIGHT_TAP_MAX_CENTROID_TRAVEL` | 0.03 | How far the midpoint between the two fingers may move during a two-finger tap |

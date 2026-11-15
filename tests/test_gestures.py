@@ -198,7 +198,11 @@ def phantom_then_double(g):
 case("double-tap where both taps have phantom contacts", phantom_then_double, TAP + [("Ldown", 2), ("Lup", 2)])
 case("sloppy 2nd tap (6% slide, cursor still) = double-click",
      lambda g: (frames(g, 1, 0.08), gap(0.1), frames(g, 1, 0.07, travel=0.06)), TAP + [("Ldown", 2), ("Lup", 2)])
-case("sloppy FIRST tap (6% slide) = not a tap", lambda g: frames(g, 1, 0.07, travel=0.06), [])
+case("sloppy first tap (6% slide, cursor still) = tap", lambda g: frames(g, 1, 0.07, travel=0.06), TAP)
+case("first touch sliding 10% = not a tap", lambda g: frames(g, 1, 0.07, travel=0.10), [])
+case("slow tap (0.28 s, cursor still) = click", lambda g: frames(g, 1, 0.28), TAP)
+case("second tap with 5 px cursor wobble = double-click, not a press",
+     lambda g: (frames(g, 1, 0.08), gap(0.1), frames(g, 1, 0.07, move=(5, 0))), TAP + [("Ldown", 2), ("Lup", 2)])
 case("two-finger tap lasting 0.22 s = right click", lambda g: raw(g, [TWO] * 27 + [[]]), [("Rdown", 1), ("Rup", 1)])
 case("two-finger tap with finger-ID swap = right click",
      lambda g: raw(g, [TWO] * 5 + [TWO_SWAPPED] * 5 + [[]]), [("Rdown", 1), ("Rup", 1)])
@@ -229,4 +233,4 @@ print()
 if failures:
     print("%d FAILED: %s" % (len(failures), ", ".join(failures)))
     sys.exit(1)
-print("All %d gesture tests passed." % 30)
+print("All %d gesture tests passed." % 33)

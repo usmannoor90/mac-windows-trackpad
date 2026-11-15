@@ -24,19 +24,22 @@ import sys
 import threading
 import time
 
-__version__ = "1.9.0"
+__version__ = "1.10.0"
 
 log = logging.getLogger("instant_release")
 
 # ---------------------------------------------------------------------------
 # Tuning (seconds / screen points / fraction of trackpad size)
 # ---------------------------------------------------------------------------
-TAP_MAX_DURATION = 0.22  # longest touch that still counts as a 1-finger tap
+TAP_MAX_DURATION = 0.30  # longest touch that still counts as a 1-finger tap (measured slow taps: 0.28 s)
 TAP_MAX_CURSOR_MOVE = 6.0  # px the cursor may move during a tap
-TAP_MAX_FINGER_TRAVEL = 0.025  # glass travel allowed during a 1-finger tap
+# macOS keeps the cursor still for a tap even when the finger slides a little,
+# so the cursor-move limit above is the real guard. Measured sloppy taps slide
+# 3-8% of the pad; this limit only rejects outright swipes.
+TAP_MAX_FINGER_TRAVEL = 0.08
 # The 2nd/3rd tap of a double/triple-tap tends to be sloppier (a small flick on
 # the glass) while macOS still keeps the cursor still; allow more travel then.
-DOUBLE_TAP_MAX_FINGER_TRAVEL = 0.08
+DOUBLE_TAP_MAX_FINGER_TRAVEL = 0.10
 DOUBLE_TAP_MAX_GAP = 0.38  # max time between taps for a double/triple click
 DOUBLE_TAP_MAX_SHIFT = 10.0  # px the cursor may move between those taps
 # Tap, then touch down again within DRAG_ARM_WINDOW -> that touch is a
@@ -48,7 +51,7 @@ DOUBLE_TAP_MAX_SHIFT = 10.0  # px the cursor may move between those taps
 # Raising this towards 0.45 gives Windows-style any-rhythm drags but also
 # drags things when you tap them and move the cursor right away.
 DRAG_ARM_WINDOW = 0.14
-DRAG_START_MOVE = 3.0  # px of cursor movement that presses the button down
+DRAG_START_MOVE = 6.0  # px of cursor movement that presses the button down (= tap wobble limit)
 MULTITOUCH_COOLDOWN = 0.35  # ignore 1-finger taps this long after 2+ fingers
 RIGHT_TAP_MAX_DURATION = 0.25  # longest 2-finger tap that right-clicks
 RIGHT_TAP_MAX_CENTROID_TRAVEL = 0.03  # how far the midpoint of the 2 fingers may move
