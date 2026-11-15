@@ -67,6 +67,7 @@ Now tap something. It should click instantly.
 - **Physical clicks are left alone.** If the trackpad is pressed during a touch, the script does nothing, so a click never counts twice (a checkbox won't toggle on and back off).
 - **Palm guard:** taps within 0.3 s of a key press are ignored, so resting your palm while typing doesn't move the text cursor.
 - **Scroll guard:** for 0.35 s after a two-finger gesture, one-finger taps are ignored, so lifting your fingers unevenly after a scroll doesn't click.
+- **Phantom contacts ignored:** the trackpad sometimes reports a second contact for a frame or two as a finger lands. A touch only counts as two-finger after 3 frames (24 ms), so a tap never turns into a right-click.
 - **Magic Mouse is skipped.** Only trackpads are used. Touching a Magic Mouse's surface never produces a click.
 - **No stuck button:** a drag interrupted by sleep, quitting or a second finger always releases the button.
 - **Press guard:** a real press during a tap-drag is intercepted, so it can't end or restart the drag. (Many people press down while dragging windows; without this, macOS sees two button-downs and drops the window when the pressure eases.)
@@ -151,7 +152,10 @@ All the timing and distance values are constants near the top of [instant_releas
 | `DRAG_ARM_WINDOW` | 0.14 s | How soon after a tap the finger must come back down to start a drag. Measured: quick tap-tap-drags land within 0.06–0.11 s, cursor moves after a click land after 0.17 s. Raise it towards 0.45 for Windows-style any-rhythm drags, at the cost of dragging things when you tap them and move the cursor right away |
 | `MULTITOUCH_COOLDOWN` | 0.35 s | Taps are ignored this long after a scroll or other two-finger gesture |
 | `TYPING_COOLDOWN` | 0.30 s | Taps are ignored this long after a key press (palm guard) |
-| `RIGHT_TAP_MAX_DURATION` | 0.18 s | Longest two-finger touch that still right-clicks |
+| `DOUBLE_TAP_MAX_FINGER_TRAVEL` | 0.08 | How far the finger may slide during the second tap of a double-tap (the cursor must still not move) |
+| `MULTI_MIN_FRAMES` | 3 | Frames (8 ms each) with two contacts before a touch counts as two-finger; filters phantom contacts |
+| `RIGHT_TAP_MAX_DURATION` | 0.25 s | Longest two-finger touch that still right-clicks |
+| `RIGHT_TAP_MAX_CENTROID_TRAVEL` | 0.03 | How far the midpoint between the two fingers may move during a two-finger tap |
 
 After editing, run `python3 tests/test_gestures.py` (22 simulated-finger tests, nothing is posted to the system), then `./install.sh` again.
 

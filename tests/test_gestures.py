@@ -163,8 +163,70 @@ def late_processing(g):
 
 case("hardware timestamps beat a stalled wall clock", late_processing, TAP)
 
+
+def raw(g, seq):
+    """Feed explicit frames: seq is a list of lists of (id, x, y) per frame."""
+    for contacts in seq:
+        arr = (m.MTFinger * 3)()
+        for i, (fid, x, y) in enumerate(contacts):
+            arr[i].identifier = fid
+            arr[i].normalized.position.x = x
+            arr[i].normalized.position.y = y
+        g.on_frame(arr, len(contacts))
+        T[0] += 0.008
+
+
+ONE = [(0, 0.5, 0.5)]
+PHANTOM = [(0, 0.5, 0.5), (9, 0.52, 0.5)]
+TWO = [(0, 0.4, 0.5), (1, 0.6, 0.5)]
+TWO_SWAPPED = [(1, 0.4, 0.5), (0, 0.6, 0.5)]
+
+
+def phantom_tap(g):
+    raw(g, [PHANTOM] + [ONE] * 8 + [[]])
+
+
+case("phantom 2nd contact for one frame = still a tap", phantom_tap, TAP)
+
+
+def phantom_then_double(g):
+    phantom_tap(g)
+    gap(0.1)
+    raw(g, [PHANTOM, PHANTOM] + [ONE] * 7 + [[]])
+
+
+case("double-tap where both taps have phantom contacts", phantom_then_double, TAP + [("Ldown", 2), ("Lup", 2)])
+case("sloppy 2nd tap (6% slide, cursor still) = double-click",
+     lambda g: (frames(g, 1, 0.08), gap(0.1), frames(g, 1, 0.07, travel=0.06)), TAP + [("Ldown", 2), ("Lup", 2)])
+case("sloppy FIRST tap (6% slide) = not a tap", lambda g: frames(g, 1, 0.07, travel=0.06), [])
+case("two-finger tap lasting 0.22 s = right click", lambda g: raw(g, [TWO] * 27 + [[]]), [("Rdown", 1), ("Rup", 1)])
+case("two-finger tap with finger-ID swap = right click",
+     lambda g: raw(g, [TWO] * 5 + [TWO_SWAPPED] * 5 + [[]]), [("Rdown", 1), ("Rup", 1)])
+
+
+def two_finger_flick(g):
+    seq = [[(0, 0.4 + 0.15 * i / 20, 0.5), (1, 0.6 + 0.15 * i / 20, 0.5)] for i in range(21)]
+    raw(g, seq + [[]])
+
+
+case("two-finger flick (midpoint moves 15%) = nothing", two_finger_flick, [])
+
+
+def blip_during_drag(g):
+    frames(g, 1, 0.08)
+    gap(0.1)
+    arr = [ONE] * 14
+    raw(g, arr)
+    for i in range(30):
+        CUR[0] = m.CGPoint(CUR[0].x + 3, CUR[0].y)
+        raw(g, [PHANTOM if i == 10 else ONE])
+    raw(g, [[]])
+
+
+case("phantom contact during a drag does not end it", blip_during_drag, TAP + DRAG)
+
 print()
 if failures:
     print("%d FAILED: %s" % (len(failures), ", ".join(failures)))
     sys.exit(1)
-print("All %d gesture tests passed." % 22)
+print("All %d gesture tests passed." % 30)

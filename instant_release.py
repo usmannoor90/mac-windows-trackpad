@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 log = logging.getLogger("instant_release")
 
@@ -34,6 +34,9 @@ log = logging.getLogger("instant_release")
 TAP_MAX_DURATION = 0.22  # longest touch that still counts as a 1-finger tap
 TAP_MAX_CURSOR_MOVE = 6.0  # px the cursor may move during a tap
 TAP_MAX_FINGER_TRAVEL = 0.025  # glass travel allowed during a 1-finger tap
+# The 2nd/3rd tap of a double/triple-tap tends to be sloppier (a small flick on
+# the glass) while macOS still keeps the cursor still; allow more travel then.
+DOUBLE_TAP_MAX_FINGER_TRAVEL = 0.08
 DOUBLE_TAP_MAX_GAP = 0.38  # max time between taps for a double/triple click
 DOUBLE_TAP_MAX_SHIFT = 10.0  # px the cursor may move between those taps
 # Tap, then touch down again within DRAG_ARM_WINDOW -> that touch is a
@@ -47,8 +50,12 @@ DOUBLE_TAP_MAX_SHIFT = 10.0  # px the cursor may move between those taps
 DRAG_ARM_WINDOW = 0.14
 DRAG_START_MOVE = 3.0  # px of cursor movement that presses the button down
 MULTITOUCH_COOLDOWN = 0.35  # ignore 1-finger taps this long after 2+ fingers
-RIGHT_TAP_MAX_DURATION = 0.18  # longest 2-finger tap that right-clicks
-RIGHT_TAP_MAX_FINGER_TRAVEL = 0.015  # glass travel allowed for 2-finger tap
+RIGHT_TAP_MAX_DURATION = 0.25  # longest 2-finger tap that right-clicks
+RIGHT_TAP_MAX_CENTROID_TRAVEL = 0.03  # how far the midpoint of the 2 fingers may move
+# The trackpad often reports a phantom second contact for 1-2 frames as a
+# finger lands. A touch counts as multi-finger only after this many frames
+# (8 ms each) with 2+ contacts; a real two-finger tap shows 20-30.
+MULTI_MIN_FRAMES = 3
 TYPING_COOLDOWN = 0.30  # ignore taps this soon after a key press (palm guard)
 WAKE_GAP = 3.0  # main-loop clock jump that means "woke from sleep"
 DEVICE_WAIT_SECONDS = 30  # how long to wait for trackpad hardware per attempt
@@ -306,6 +313,9 @@ class Gestures:
         self.drag_start_pos = None
         self.finger_start = {}
         self.max_travel = 0.0
+        self.multi_frames = 0  # frames seen with 2+ contacts
+        self.centroid_start = None
+        self.max_centroid_travel = 0.0
         self.physical_click = False  # trackpad was pressed during this touch
         self.typing = False  # touch began right after a key press
 
@@ -333,10 +343,14 @@ class Gestures:
             now = time.time()
         if n_fingers > 0:
             self._track_travel(fingers_ptr, n_fingers)
+            if n_fingers > 1:
+                self.multi_frames += 1
+            # A brief phantom second contact counts as one finger.
+            effective = n_fingers if n_fingers == 1 or self.multi_frames >= MULTI_MIN_FRAMES else 1
             if not self.touching:
-                self._touch_began(n_fingers, now)
+                self._touch_began(effective, now)
             else:
-                self._touch_moved(n_fingers, now)
+                self._touch_moved(effective, now)
             # A real press is handled entirely by macOS; we must not add a
             # second click (that would toggle checkboxes twice, etc.).
             if not self.is_dragging and not self.physical_click and physical_button_down():
@@ -347,16 +361,29 @@ class Gestures:
             self._touch_ended(now)
 
     def _track_travel(self, fingers_ptr, n_fingers):
+        cx = cy = 0.0
         for i in range(n_fingers):
             f = fingers_ptr[i]
             fx = f.normalized.position.x
             fy = f.normalized.position.y
+            cx += fx
+            cy += fy
             start = self.finger_start.get(f.identifier)
             if start is None:
                 self.finger_start[f.identifier] = (fx, fy)
             else:
                 travel = ((fx - start[0]) ** 2 + (fy - start[1]) ** 2) ** 0.5
                 self.max_travel = max(self.max_travel, travel)
+        if n_fingers > 1:
+            # Midpoint travel: immune to the trackpad swapping finger IDs,
+            # which makes per-finger travel jump by the finger spacing.
+            cx /= n_fingers
+            cy /= n_fingers
+            if self.centroid_start is None:
+                self.centroid_start = (cx, cy)
+            else:
+                d = ((cx - self.centroid_start[0]) ** 2 + (cy - self.centroid_start[1]) ** 2) ** 0.5
+                self.max_centroid_travel = max(self.max_centroid_travel, d)
 
     def _touch_began(self, n_fingers, now):
         self.touching = True
@@ -402,6 +429,18 @@ class Gestures:
                 self.last_drag_pos = cur
                 post_mouse_event(kCGEventLeftMouseDragged, cur, delta=delta)
 
+    def _follows_tap(self, now, cur):
+        """True if this touch is a candidate 2nd/3rd tap of a multi-click."""
+        if self.last_tap_pos is None:
+            return False
+        return (
+            now - self.last_tap_up_time < DOUBLE_TAP_MAX_GAP
+            and distance(cur, self.last_tap_pos) < DOUBLE_TAP_MAX_SHIFT
+        )
+
+    def _tap_travel_limit(self, now, cur):
+        return DOUBLE_TAP_MAX_FINGER_TRAVEL if self._follows_tap(now, cur) else TAP_MAX_FINGER_TRAVEL
+
     def _touch_ended(self, now):
         cur = get_cursor_pos()
         duration = now - self.touch_start_time
@@ -423,12 +462,10 @@ class Gestures:
             self.max_fingers == 1
             and duration < TAP_MAX_DURATION
             and cursor_move < TAP_MAX_CURSOR_MOVE
-            and self.max_travel < TAP_MAX_FINGER_TRAVEL
+            and self.max_travel < self._tap_travel_limit(now, cur)
             and (now - self.last_multitouch_time) > MULTITOUCH_COOLDOWN
         ):
-            gap = now - self.last_tap_up_time
-            shift = distance(cur, self.last_tap_pos) if self.last_tap_pos else 999.0
-            if gap < DOUBLE_TAP_MAX_GAP and shift < DOUBLE_TAP_MAX_SHIFT:
+            if self._follows_tap(now, cur):
                 self.click_count += 1  # double, triple, ... at the same spot
                 pos = self.last_tap_pos
             else:
@@ -443,7 +480,7 @@ class Gestures:
         elif (
             self.max_fingers == 2
             and duration < RIGHT_TAP_MAX_DURATION
-            and self.max_travel < RIGHT_TAP_MAX_FINGER_TRAVEL
+            and self.max_centroid_travel < RIGHT_TAP_MAX_CENTROID_TRAVEL
         ):
             post_mouse_event(kCGEventRightMouseDown, cur, kCGMouseButtonRight)
             post_mouse_event(kCGEventRightMouseUp, cur, kCGMouseButtonRight)
