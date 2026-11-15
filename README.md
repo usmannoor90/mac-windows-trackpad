@@ -74,6 +74,10 @@ Now tap something. It should click instantly.
 - **Load-proof timing:** gestures are timed with the trackpad's own hardware timestamps and the script runs at user-interactive priority, so a busy Mac (video call, build, heavy browser tab) can't turn a quick tap into an ignored long press.
 - **Only one copy runs at a time**, so clicks are never doubled by a duplicate process.
 
+## Finder keys, Windows style
+
+In Finder, **Return opens** the selected folder or file (it sends ⌘↓) and **Delete / Backspace goes back** (⌘[), like Windows Explorer. This only happens when Finder is frontmost, no modifier key is held, and keyboard focus is on a file view, so renaming a file (Return confirms, Delete deletes a character), the search box, dialogs and ⌘Delete (Move to Trash) all behave as normal. To turn it off, set `FINDER_WINDOWS_KEYS = False` at the top of the script and run `./install.sh`.
+
 ## Everyday commands
 
 ```sh

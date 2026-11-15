@@ -20,11 +20,12 @@ import fcntl
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
 
-__version__ = "1.10.0"
+__version__ = "1.11.0"
 
 log = logging.getLogger("instant_release")
 
@@ -131,6 +132,26 @@ cg.CGEventSetIntegerValueField.argtypes = [
     ctypes.c_int64,
 ]
 cg.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+cg.CGEventGetFlags.argtypes = [ctypes.c_void_p]
+cg.CGEventGetFlags.restype = ctypes.c_uint64
+appservices.AXUIElementCreateApplication.argtypes = [ctypes.c_int]
+appservices.AXUIElementCreateApplication.restype = ctypes.c_void_p
+appservices.AXUIElementCopyAttributeValue.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_void_p),
+]
+appservices.AXUIElementCopyAttributeValue.restype = ctypes.c_int
+appservices.AXUIElementSetMessagingTimeout.argtypes = [ctypes.c_void_p, ctypes.c_float]
+cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+cf.CFStringGetCString.restype = ctypes.c_bool
+cf.CFGetTypeID.argtypes = [ctypes.c_void_p]
+cf.CFGetTypeID.restype = ctypes.c_ulong
+cf.CFStringGetTypeID.restype = ctypes.c_ulong
+cf.CFBooleanGetValue.argtypes = [ctypes.c_void_p]
+cf.CFBooleanGetValue.restype = ctypes.c_bool
 cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
 cg.CGEventGetIntegerValueField.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
 cg.CGEventGetIntegerValueField.restype = ctypes.c_int64
@@ -214,6 +235,21 @@ kCGMouseEventDeltaX = 4
 kCGMouseEventDeltaY = 5
 # Shift | Control | Option | Command
 MODIFIER_MASK = 0x00020000 | 0x00040000 | 0x00080000 | 0x00100000
+
+# Finder, Windows style: Return opens the selection, Delete/Backspace goes back.
+# Only when Finder is frontmost, no modifier is held, and keyboard focus is on
+# a file view (never while renaming, in the search box, or in a dialog).
+FINDER_WINDOWS_KEYS = True
+kCGEventKeyUp = 11
+kCGKeyboardEventKeycode = 9
+kCGEventFlagMaskCommand = 0x00100000
+kCFStringEncodingUTF8 = 0x08000100
+KEY_RETURN = 36
+KEY_DELETE = 51  # the Mac "delete" key = Backspace
+KEY_DOWN_ARROW = 125
+KEY_LEFT_BRACKET = 33
+FINDER_KEY_MAP = {KEY_RETURN: KEY_DOWN_ARROW, KEY_DELETE: KEY_LEFT_BRACKET}  # + Command
+FINDER_FILE_VIEW_ROLES = ("AXList", "AXOutline", "AXBrowser", "AXTable")
 
 CALLBACK_TYPE = ctypes.CFUNCTYPE(
     ctypes.c_int,
@@ -643,6 +679,106 @@ def any_drag_active():
         return any(g.is_dragging for g in gestures.values())
 
 
+class FinderKeys:
+    """Windows-style keys in Finder: Return opens the selection (Cmd+Down),
+    Delete/Backspace goes back (Cmd+[). Decided on key-down and remembered
+    until the matching key-up, so an app never sees a mismatched up."""
+
+    def __init__(self):
+        self.app = None  # AXUIElement of Finder
+        self.next_lookup = 0.0
+        self.active = {}  # original keycode -> remapped keycode, while held
+        self._strings = {}
+
+    def _cfstr(self, text):
+        ref = self._strings.get(text)
+        if ref is None:
+            ref = cf.CFStringCreateWithCString(None, text.encode(), kCFStringEncodingUTF8)
+            self._strings[text] = ref
+        return ref
+
+    def _attr(self, element, name):
+        value = ctypes.c_void_p()
+        err = appservices.AXUIElementCopyAttributeValue(element, self._cfstr(name), ctypes.byref(value))
+        return err, value.value
+
+    def _role(self, element):
+        _, ref = self._attr(element, "AXRole")
+        if not ref:
+            return None
+        role = None
+        if cf.CFGetTypeID(ref) == cf.CFStringGetTypeID():
+            buf = ctypes.create_string_buffer(128)
+            if cf.CFStringGetCString(ref, buf, 128, kCFStringEncodingUTF8):
+                role = buf.value.decode()
+        cf.CFRelease(ref)
+        return role
+
+    def _finder(self):
+        if self.app is not None:
+            return self.app
+        if time.time() < self.next_lookup:
+            return None
+        self.next_lookup = time.time() + 5
+        try:
+            pids = subprocess.run(
+                ["/usr/bin/pgrep", "-x", "Finder"], capture_output=True, text=True, timeout=1
+            ).stdout.split()
+        except Exception:
+            pids = []
+        if not pids:
+            return None
+        self.app = appservices.AXUIElementCreateApplication(int(pids[0]))
+        appservices.AXUIElementSetMessagingTimeout(self.app, 0.1)
+        return self.app
+
+    def should_remap(self):
+        app = self._finder()
+        if app is None:
+            return False
+        err, front = self._attr(app, "AXFrontmost")
+        if err != 0:
+            self.app = None  # Finder restarted or is not answering; re-resolve later
+            return False
+        is_front = bool(front) and cf.CFBooleanGetValue(front)
+        if front:
+            cf.CFRelease(front)
+        if not is_front:
+            return False
+        err, focused = self._attr(app, "AXFocusedUIElement")
+        if err != 0 or not focused:
+            return False
+        role = self._role(focused)
+        cf.CFRelease(focused)
+        if role not in FINDER_FILE_VIEW_ROLES:
+            log.debug("finder keys: focus is on %s, leaving the key alone", role)
+            return False
+        return True
+
+    def handle(self, event_type, event):
+        """Returns the event, remapped in place when appropriate."""
+        keycode = cg.CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
+        if event_type == kCGEventKeyUp:
+            target = self.active.pop(keycode, None)
+            if target is None:
+                return event
+        else:
+            target = self.active.get(keycode)  # key repeat keeps the decision
+            if target is None:
+                if keycode not in FINDER_KEY_MAP:
+                    return event
+                if cg.CGEventGetFlags(event) & MODIFIER_MASK:
+                    return event  # Cmd+Delete etc. untouched
+                if not self.should_remap():
+                    return event
+                target = FINDER_KEY_MAP[keycode]
+                self.active[keycode] = target
+                log.debug("finder keys: key %d -> cmd+%d", keycode, target)
+        cg.CGEventSetIntegerValueField(event, kCGKeyboardEventKeycode, target)
+        cg.CGEventSetFlags(event, cg.CGEventGetFlags(event) | kCGEventFlagMaskCommand)
+        return event
+
+
 class PressGuard:
     """Event tap that swallows a real trackpad press (and its release) while a
     synthetic tap-drag is in progress. Measured on a real user: when dragging a
@@ -654,10 +790,13 @@ class PressGuard:
     def __init__(self):
         self.port = None
         self.swallow_up = False
+        self.finder_keys = FinderKeys() if FINDER_WINDOWS_KEYS else None
         self._callback_ref = TAP_CALLBACK_TYPE(self._callback)  # keep alive
 
     def start(self):
         mask = (1 << kCGEventLeftMouseDown) | (1 << kCGEventLeftMouseUp)
+        if self.finder_keys:
+            mask |= (1 << kCGEventKeyDown) | (1 << kCGEventKeyUp)
         self.port = cg.CGEventTapCreate(
             kCGSessionEventTap,
             kCGHeadInsertEventTap,
@@ -670,7 +809,7 @@ class PressGuard:
             log.warning("press guard unavailable (event tap could not be created)")
             return False
         threading.Thread(target=self._run, name="press-guard", daemon=True).start()
-        log.info("press guard active")
+        log.info("press guard active%s", " (+ Finder keys)" if self.finder_keys else "")
         return True
 
     def _run(self):
@@ -685,6 +824,8 @@ class PressGuard:
             if event_type in (kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput):
                 cg.CGEventTapEnable(self.port, True)
                 return event
+            if event_type in (kCGEventKeyDown, kCGEventKeyUp):
+                return self.finder_keys.handle(event_type, event) if self.finder_keys else event
             if cg.CGEventGetIntegerValueField(event, kCGEventSourceUserData) == SYNTHETIC_TAG:
                 return event  # one of ours
             if event_type == kCGEventLeftMouseDown:
