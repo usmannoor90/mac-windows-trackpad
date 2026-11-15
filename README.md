@@ -153,7 +153,7 @@ All the timing and distance values are constants near the top of [instant_releas
 | `TYPING_COOLDOWN` | 0.30 s | Taps are ignored this long after a key press (palm guard) |
 | `RIGHT_TAP_MAX_DURATION` | 0.18 s | Longest two-finger touch that still right-clicks |
 
-After editing, run `./install.sh` again.
+After editing, run `python3 tests/test_gestures.py` (22 simulated-finger tests, nothing is posted to the system), then `./install.sh` again.
 
 ## How it works
 
