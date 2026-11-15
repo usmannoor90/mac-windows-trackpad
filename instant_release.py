@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-__version__ = "1.7.1"
+__version__ = "1.8.0"
 
 log = logging.getLogger("instant_release")
 
@@ -325,8 +325,12 @@ class Gestures:
         self.release_drag()
         self.reset_touch()
 
-    def on_frame(self, fingers_ptr, n_fingers):
-        now = time.time()
+    def on_frame(self, fingers_ptr, n_fingers, now=None):
+        # `now` is the trackpad's own frame timestamp (seconds, 125 Hz). Using
+        # it instead of time.time() keeps tap durations and gaps correct even
+        # when a busy system delivers the frames to us late.
+        if now is None:
+            now = time.time()
         if n_fingers > 0:
             self._track_travel(fingers_ptr, n_fingers)
             if not self.touching:
@@ -461,12 +465,32 @@ gestures = {}
 state_lock = threading.RLock()  # re-entrant: the SIGTERM handler may run while held
 
 
+_libsystem = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+_libsystem.pthread_set_qos_class_self_np.argtypes = [ctypes.c_uint, ctypes.c_int]
+QOS_CLASS_USER_INTERACTIVE = 0x21
+_boosted_threads = set()
+
+
+def boost_current_thread():
+    """Ask the scheduler to treat this thread as user-interactive, so a busy
+    system (video call, build, browser) can't delay touch processing."""
+    tid = threading.get_ident()
+    if tid in _boosted_threads:
+        return
+    _boosted_threads.add(tid)
+    try:
+        _libsystem.pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
+    except Exception:
+        pass
+
+
 def _touch_callback(device, fingers_ptr, n_fingers, timestamp, frame):
     try:
+        boost_current_thread()
         with state_lock:
             g = gestures.get(device)
             if g is not None:
-                g.on_frame(fingers_ptr, n_fingers)
+                g.on_frame(fingers_ptr, n_fingers, timestamp)
     except Exception:  # an exception must never escape into the C callback
         log.exception("error in touch callback")
     return 0
@@ -610,6 +634,7 @@ class PressGuard:
         return True
 
     def _run(self):
+        boost_current_thread()
         source = cf.CFMachPortCreateRunLoopSource(None, self.port, 0)
         cf.CFRunLoopAddSource(cf.CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes)
         cg.CGEventTapEnable(self.port, True)
@@ -672,6 +697,7 @@ def main():
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
+    boost_current_thread()
 
     log.info("instant_release %s started (pid %d)", __version__, os.getpid())
     start_devices()
@@ -682,11 +708,19 @@ def main():
     # time.time() keeps counting while the Mac sleeps, so a big jump between
     # one-second ticks means we just woke up and the device handles are stale.
     last_tick = time.time()
+    last_mono = time.monotonic()
     while True:
         time.sleep(1)
         now = time.time()
+        mono = time.monotonic()
         if (now - last_tick) > WAKE_GAP:
-            log.info("wake from sleep detected (%.0fs gap), reattaching", now - last_tick)
+            # The monotonic clock pauses during sleep; if it advanced just as
+            # much, the process was merely stalled by CPU load, not asleep.
+            log.info(
+                "wake from sleep detected (%.0fs gap, monotonic %.0fs), reattaching",
+                now - last_tick,
+                mono - last_mono,
+            )
             time.sleep(1.5)
             start_devices()
         elif not active_devices:
@@ -694,6 +728,7 @@ def main():
         if press_guard.port is None and accessibility_trusted():
             press_guard.start()
         last_tick = time.time()
+        last_mono = time.monotonic()
 
 
 if __name__ == "__main__":

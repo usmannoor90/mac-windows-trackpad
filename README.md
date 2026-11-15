@@ -70,6 +70,7 @@ Now tap something. It should click instantly.
 - **Magic Mouse is skipped.** Only trackpads are used. Touching a Magic Mouse's surface never produces a click.
 - **No stuck button:** a drag interrupted by sleep, quitting or a second finger always releases the button.
 - **Press guard:** a real press during a tap-drag is intercepted, so it can't end or restart the drag. (Many people press down while dragging windows; without this, macOS sees two button-downs and drops the window when the pressure eases.)
+- **Load-proof timing:** gestures are timed with the trackpad's own hardware timestamps and the script runs at user-interactive priority, so a busy Mac (video call, build, heavy browser tab) can't turn a quick tap into an ignored long press.
 - **Only one copy runs at a time**, so clicks are never doubled by a duplicate process.
 
 ## Everyday commands
