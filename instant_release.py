@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 
-__version__ = "1.12.0"
+__version__ = "1.13.0"
 
 log = logging.getLogger("instant_release")
 
@@ -181,6 +181,8 @@ cf.CFMachPortCreateRunLoopSource.restype = ctypes.c_void_p
 cf.CFRunLoopGetCurrent.restype = ctypes.c_void_p
 cf.CFRunLoopAddSource.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 cf.CFRunLoopRun.argtypes = []
+cf.CFRunLoopStop.argtypes = [ctypes.c_void_p]
+cf.CFMachPortInvalidate.argtypes = [ctypes.c_void_p]
 kCFRunLoopCommonModes = ctypes.c_void_p.in_dll(cf, "kCFRunLoopCommonModes")
 cg.CGEventSourceButtonState.argtypes = [ctypes.c_int32, ctypes.c_uint32]
 cg.CGEventSourceButtonState.restype = ctypes.c_bool
@@ -258,6 +260,17 @@ KEY_DOWN_ARROW = 125
 KEY_LEFT_BRACKET = 33
 FINDER_KEY_MAP = {KEY_RETURN: KEY_DOWN_ARROW, KEY_DELETE: KEY_LEFT_BRACKET}  # + Command
 FINDER_FILE_VIEW_ROLES = ("AXList", "AXOutline", "AXBrowser", "AXTable")
+# Every key press and click passes through this script's event tap before any
+# app sees it, so the tap callback must never wait on anything. Whether Finder
+# is frontmost with a file view focused is polled on a background thread this
+# often; the callback only reads the result.
+FINDER_POLL_SECONDS = 0.1
+# If macOS reports the tap as too slow this many times within the window, the
+# script stops intercepting keys (and then clicks) instead of re-arming it, so
+# it can never make the keyboard or trackpad laggy.
+TAP_TIMEOUT_LIMIT = 2
+TAP_TIMEOUT_WINDOW = 120.0
+PRESS_GUARD_RETRY_SECONDS = 600.0
 
 CALLBACK_TYPE = ctypes.CFUNCTYPE(
     ctypes.c_int,
@@ -779,6 +792,23 @@ class FinderKeys:
         self.next_lookup = 0.0
         self.active = {}  # original keycode -> remapped keycode, while held
         self._strings = {}
+        self.remap_now = False  # written by the poll thread, read by the tap
+        self.stopped = False
+
+    def start(self):
+        threading.Thread(target=self._poll, name="finder-keys", daemon=True).start()
+
+    def stop(self):
+        self.stopped = True
+        self.remap_now = False
+
+    def _poll(self):
+        while not self.stopped:
+            try:
+                self.remap_now = self.should_remap()
+            except Exception:
+                self.remap_now = False
+            time.sleep(FINDER_POLL_SECONDS)
 
     def _cfstr(self, text):
         ref = self._strings.get(text)
@@ -841,12 +871,12 @@ class FinderKeys:
         role = self._role(focused)
         cf.CFRelease(focused)
         if role not in FINDER_FILE_VIEW_ROLES:
-            log.debug("finder keys: focus is on %s, leaving the key alone", role)
             return False
         return True
 
     def handle(self, event_type, event):
-        """Returns the event, remapped in place when appropriate."""
+        """Returns the event, remapped in place when appropriate. Runs inside
+        the event tap: no I/O, no IPC, nothing that can wait."""
         keycode = cg.CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
         if event_type == kCGEventKeyUp:
             target = self.active.pop(keycode, None)
@@ -859,11 +889,10 @@ class FinderKeys:
                     return event
                 if cg.CGEventGetFlags(event) & MODIFIER_MASK:
                     return event  # Cmd+Delete etc. untouched
-                if not self.should_remap():
+                if not self.remap_now:
                     return event
                 target = FINDER_KEY_MAP[keycode]
                 self.active[keycode] = target
-                log.debug("finder keys: key %d -> cmd+%d", keycode, target)
         cg.CGEventSetIntegerValueField(event, kCGKeyboardEventKeycode, target)
         cg.CGEventSetFlags(event, cg.CGEventGetFlags(event) | kCGEventFlagMaskCommand)
         return event
@@ -879,8 +908,12 @@ class PressGuard:
 
     def __init__(self):
         self.port = None
+        self.loop = None
         self.swallow_up = False
         self.finder_keys = FinderKeys() if FINDER_WINDOWS_KEYS else None
+        self.timeouts = []
+        self.failed = False  # set by the tap thread, handled by the main loop
+        self.retry_at = 0.0
         self._callback_ref = TAP_CALLBACK_TYPE(self._callback)  # keep alive
 
     def start(self):
@@ -898,20 +931,59 @@ class PressGuard:
         if not self.port:
             log.warning("press guard unavailable (event tap could not be created)")
             return False
+        self.failed = False
+        self.timeouts = []
         threading.Thread(target=self._run, name="press-guard", daemon=True).start()
+        if self.finder_keys:
+            self.finder_keys.start()
         log.info("press guard active%s", " (+ Finder keys)" if self.finder_keys else "")
         return True
 
     def _run(self):
         boost_current_thread()
+        self.loop = cf.CFRunLoopGetCurrent()
         source = cf.CFMachPortCreateRunLoopSource(None, self.port, 0)
         cf.CFRunLoopAddSource(cf.CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes)
         cg.CGEventTapEnable(self.port, True)
         cf.CFRunLoopRun()
 
+    def recover(self):
+        """Called from the main loop after repeated tap timeouts: tear the tap
+        down and come back with less (keys off first, then clicks paused)."""
+        if self.loop:
+            cf.CFRunLoopStop(self.loop)
+            self.loop = None
+        if self.port:
+            cf.CFMachPortInvalidate(self.port)
+            self.port = None
+        if self.finder_keys:
+            self.finder_keys.stop()
+            self.finder_keys = None
+            log.warning(
+                "macOS reported the event tap as too slow; Finder keys are off "
+                "until the script restarts so typing can't lag"
+            )
+        else:
+            self.retry_at = time.time() + PRESS_GUARD_RETRY_SECONDS
+            log.warning(
+                "macOS reported the event tap as too slow; press guard paused "
+                "for %.0f minutes", PRESS_GUARD_RETRY_SECONDS / 60
+            )
+        self.failed = False
+
     def _callback(self, proxy, event_type, event, refcon):
         try:
-            if event_type in (kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput):
+            if event_type == kCGEventTapDisabledByTimeout:
+                # macOS turned the tap off because we answered too slowly.
+                now = time.time()
+                self.timeouts = [t for t in self.timeouts if now - t < TAP_TIMEOUT_WINDOW]
+                self.timeouts.append(now)
+                if len(self.timeouts) >= TAP_TIMEOUT_LIMIT:
+                    self.failed = True  # leave it off; the main loop scales back
+                else:
+                    cg.CGEventTapEnable(self.port, True)
+                return event
+            if event_type == kCGEventTapDisabledByUserInput:
                 cg.CGEventTapEnable(self.port, True)
                 return event
             if event_type in (kCGEventKeyDown, kCGEventKeyUp):
@@ -997,7 +1069,13 @@ def main():
             start_devices()
         elif not active_devices:
             start_devices()
-        if press_guard.port is None and accessibility_trusted():
+        if press_guard.failed:
+            press_guard.recover()
+        if (
+            press_guard.port is None
+            and time.time() >= press_guard.retry_at
+            and accessibility_trusted()
+        ):
             press_guard.start()
         last_tick = time.time()
         last_mono = time.monotonic()
