@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 
-__version__ = "1.13.0"
+__version__ = "1.14.0"
 
 log = logging.getLogger("instant_release")
 
@@ -271,6 +271,14 @@ FINDER_POLL_SECONDS = 0.1
 TAP_TIMEOUT_LIMIT = 2
 TAP_TIMEOUT_WINDOW = 120.0
 PRESS_GUARD_RETRY_SECONDS = 600.0
+# While a finger is on the pad the trackpad reports ~125 frames a second. If
+# they stop mid-touch (a system dialog grabbed input, the device reset), the
+# lift will never arrive: after this long the touch is ended and any drag
+# released, so the button can never stay stuck down.
+STALE_TOUCH_SECONDS = 1.0
+# The press guard only swallows a real press if the drag got a frame this
+# recently, i.e. a finger is verifiably still dragging.
+PRESS_GUARD_FRESH_SECONDS = 0.15
 
 CALLBACK_TYPE = ctypes.CFUNCTYPE(
     ctypes.c_int,
@@ -363,6 +371,7 @@ class Gestures:
         self.last_multitouch_time = 0.0
         self.is_dragging = False
         self.last_drag_pos = None
+        self.last_frame_mono = 0.0  # time.monotonic() of the latest frame
         self.reset_touch()
 
     def reset_touch(self):
@@ -401,6 +410,7 @@ class Gestures:
         # when a busy system delivers the frames to us late.
         if now is None:
             now = time.time()
+        self.last_frame_mono = time.monotonic()
         if n_fingers > 0:
             self._track_travel(fingers_ptr, n_fingers)
             if n_fingers > 1:
@@ -778,8 +788,37 @@ def ensure_double_click_time():
 
 
 def any_drag_active():
+    """Called from the event tap, so it takes no lock: the touch thread may be
+    holding state_lock while it waits on the window server, which is itself
+    waiting for the tap to answer. Plain attribute reads are safe under the GIL."""
+    now = time.monotonic()
+    for g in list(gestures.values()):
+        if g.is_dragging and now - g.last_frame_mono < PRESS_GUARD_FRESH_SECONDS:
+            return True
+    return False
+
+
+def end_stale_touches():
+    """End touches whose frames stopped arriving (see STALE_TOUCH_SECONDS)."""
+    now = time.monotonic()
     with state_lock:
-        return any(g.is_dragging for g in gestures.values())
+        for g in gestures.values():
+            if (g.touching or g.is_dragging) and now - g.last_frame_mono > STALE_TOUCH_SECONDS:
+                log.warning(
+                    "trackpad frames stopped mid-touch for %.1f s; ending the touch%s",
+                    now - g.last_frame_mono, " and releasing the drag" if g.is_dragging else "",
+                )
+                g.reset()
+                g.forget_taps()
+
+
+def _watchdog():
+    while True:
+        time.sleep(0.2)
+        try:
+            end_stale_touches()
+        except Exception:
+            log.exception("error in touch watchdog")
 
 
 class FinderKeys:
@@ -1045,6 +1084,7 @@ def main():
     log.info("instant_release %s started (pid %d)", __version__, os.getpid())
     ensure_double_click_time()
     start_devices()
+    threading.Thread(target=_watchdog, name="touch-watchdog", daemon=True).start()
     press_guard = PressGuard()
     if accessibility_trusted():
         press_guard.start()

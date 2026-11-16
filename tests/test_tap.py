@@ -76,6 +76,45 @@ pg.failed = True
 pg.recover()
 check("then pauses the press guard", pg.retry_at > time.time() + 60)
 
+# Stuck-drag protection.
+posted = []
+m.post_mouse_event = lambda t, loc, **k: posted.append(t)
+m.get_cursor_pos = lambda: m.CGPoint(0, 0)
+g = m.Gestures()
+m.gestures.clear()
+m.gestures["dev"] = g
+g.is_dragging = True
+g.touching = True
+g.last_frame_mono = time.monotonic()
+check("press guard active during a live drag", m.any_drag_active())
+g.last_frame_mono = time.monotonic() - 0.5
+check("press guard lets clicks through once frames stop", not m.any_drag_active())
+
+
+class NoLock:
+    def __enter__(self):
+        raise AssertionError("lock taken in tap path")
+
+    def __exit__(self, *a):
+        pass
+
+
+real_lock = m.state_lock
+m.state_lock = NoLock()
+try:
+    m.any_drag_active()
+    check("press guard check takes no lock", True)
+except AssertionError:
+    check("press guard check takes no lock", False)
+m.state_lock = real_lock
+
+g.last_frame_mono = time.monotonic() - 0.5
+m.end_stale_touches()
+check("touch not ended while frames are only briefly late", g.is_dragging and not posted)
+g.last_frame_mono = time.monotonic() - 2.0
+m.end_stale_touches()
+check("stale drag released (button up posted)", not g.is_dragging and not g.touching and posted == [m.kCGEventLeftMouseUp])
+
 print()
 if failures:
     print("%d FAILED: %s" % (len(failures), ", ".join(failures)))
