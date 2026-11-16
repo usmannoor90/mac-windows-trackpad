@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 
-__version__ = "1.11.0"
+__version__ = "1.12.0"
 
 log = logging.getLogger("instant_release")
 
@@ -63,6 +63,13 @@ MULTI_MIN_FRAMES = 3
 TYPING_COOLDOWN = 0.30  # ignore taps this soon after a key press (palm guard)
 WAKE_GAP = 3.0  # main-loop clock jump that means "woke from sleep"
 DEVICE_WAIT_SECONDS = 30  # how long to wait for trackpad hardware per attempt
+# A tap clicks when the finger lifts, so the two clicks of a double-tap land
+# 0.15-0.25 s apart (measured), slower than a physical double-click. Finder
+# ignores a double-click slower than the system "Double-click speed", and at
+# the fastest setting (0.15 s) most double-taps on folders fail. On start the
+# system setting is raised to at least this many seconds (Windows default:
+# 0.5). Set to None to leave the system setting alone.
+MIN_DOUBLE_CLICK_TIME = 0.5
 
 # Multitouch devices that are mice, not trackpads. Touching a Magic Mouse
 # must never produce clicks.
@@ -77,6 +84,7 @@ multitouch = ctypes.CDLL(
     "/System/Library/PrivateFrameworks/MultitouchSupport.framework/MultitouchSupport"
 )
 cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+iokit = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
 cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
 appservices = ctypes.CDLL(
     "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
@@ -671,7 +679,89 @@ def run_check():
         print("device:        %s, family %d" % (what, family))
     if not trackpads:
         print("device:        no trackpad found")
+    dct = double_click_time()
+    if dct is not None:
+        print("double-click:  %.2f s%s" % (
+            dct, "  (too fast for double-taps; restart the agent to raise it)"
+            if MIN_DOUBLE_CLICK_TIME and dct < MIN_DOUBLE_CLICK_TIME - 0.001 else ""))
     return 0 if trusted and trackpads else 1
+
+
+DOUBLE_CLICK_DEFAULTS_KEY = "com.apple.mouse.doubleClickThreshold"
+HID_CLICK_TIME_KEY = b"HIDClickTime"  # nanoseconds, what apps actually use
+kIOHIDEventSystemClientTypeMonitor = 1
+kCFNumberSInt64Type = 4
+
+
+def _hid_click_time_property(value_ns=None):
+    """Read (or, with value_ns, set) the live system double-click time.
+    Returns the value in seconds, or None if it can't be read."""
+    V = ctypes.c_void_p
+    iokit.IOHIDEventSystemClientCreateWithType.argtypes = [V, ctypes.c_int, V]
+    iokit.IOHIDEventSystemClientCreateWithType.restype = V
+    iokit.IOHIDEventSystemClientCopyProperty.argtypes = [V, V]
+    iokit.IOHIDEventSystemClientCopyProperty.restype = V
+    iokit.IOHIDEventSystemClientSetProperty.argtypes = [V, V, V]
+    iokit.IOHIDEventSystemClientSetProperty.restype = ctypes.c_bool
+    cf.CFStringCreateWithCString.argtypes = [V, ctypes.c_char_p, ctypes.c_uint32]
+    cf.CFStringCreateWithCString.restype = V
+    cf.CFNumberCreate.argtypes = [V, ctypes.c_int, V]
+    cf.CFNumberCreate.restype = V
+    cf.CFNumberGetValue.argtypes = [V, ctypes.c_int, V]
+    cf.CFNumberGetValue.restype = ctypes.c_bool
+    client = iokit.IOHIDEventSystemClientCreateWithType(
+        None, kIOHIDEventSystemClientTypeMonitor, None
+    )
+    if not client:
+        return None
+    key = cf.CFStringCreateWithCString(None, HID_CLICK_TIME_KEY, kCFStringEncodingUTF8)
+    try:
+        if value_ns is not None:
+            v = ctypes.c_int64(int(value_ns))
+            num = cf.CFNumberCreate(None, kCFNumberSInt64Type, ctypes.byref(v))
+            iokit.IOHIDEventSystemClientSetProperty(client, key, num)
+            cf.CFRelease(num)
+        ref = iokit.IOHIDEventSystemClientCopyProperty(client, key)
+        if not ref:
+            return None
+        out = ctypes.c_int64()
+        ok = cf.CFNumberGetValue(ref, kCFNumberSInt64Type, ctypes.byref(out))
+        cf.CFRelease(ref)
+        return out.value / 1e9 if ok else None
+    finally:
+        cf.CFRelease(key)
+        cf.CFRelease(client)
+
+
+def double_click_time():
+    try:
+        return _hid_click_time_property()
+    except Exception:
+        return None
+
+
+def ensure_double_click_time():
+    """Raise the system double-click speed to MIN_DOUBLE_CLICK_TIME if it is
+    faster, both live (HID system) and saved (so it survives a restart)."""
+    if not MIN_DOUBLE_CLICK_TIME:
+        return
+    try:
+        current = _hid_click_time_property()
+        if current is None or current >= MIN_DOUBLE_CLICK_TIME - 0.001:
+            return
+        new = _hid_click_time_property(MIN_DOUBLE_CLICK_TIME * 1e9)
+        subprocess.run(
+            ["/usr/bin/defaults", "write", "-g", DOUBLE_CLICK_DEFAULTS_KEY,
+             "-float", str(MIN_DOUBLE_CLICK_TIME)],
+            check=False, timeout=5,
+        )
+        log.info(
+            "double-click speed was %.2f s, too fast for double-taps; set it to "
+            "%.2f s (apps that were already open, like Finder, use the new "
+            "value after they restart)", current, new if new else MIN_DOUBLE_CLICK_TIME,
+        )
+    except Exception as exc:
+        log.warning("could not adjust double-click speed: %s", exc)
 
 
 def any_drag_active():
@@ -881,6 +971,7 @@ def main():
     boost_current_thread()
 
     log.info("instant_release %s started (pid %d)", __version__, os.getpid())
+    ensure_double_click_time()
     start_devices()
     press_guard = PressGuard()
     if accessibility_trusted():

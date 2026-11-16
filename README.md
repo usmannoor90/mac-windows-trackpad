@@ -73,6 +73,7 @@ Now tap something. It should click instantly.
 - **Press guard:** a real press during a tap-drag is intercepted, so it can't end or restart the drag. (Many people press down while dragging windows; without this, macOS sees two button-downs and drops the window when the pressure eases.)
 - **Load-proof timing:** gestures are timed with the trackpad's own hardware timestamps and the script runs at user-interactive priority, so a busy Mac (video call, build, heavy browser tab) can't turn a quick tap into an ignored long press.
 - **Only one copy runs at a time**, so clicks are never doubled by a duplicate process.
+- **Double-click speed:** a tap clicks when your finger lifts, so the two clicks of a double-tap arrive 0.15–0.25 s apart, a bit slower than a physical double-click. Finder ignores double-clicks slower than the system **Double-click speed**, so at the fastest setting (0.15 s) double-tapping a folder rarely opens it. When the script starts, it raises that setting to 0.5 s (the Windows default) if it is faster. Apps that were already open, including Finder, use the new value after they restart (`killall Finder`, or log out and back in). The setting stays after you uninstall; change it in System Settings → Accessibility → Pointer Control → Double-click speed. Set `MIN_DOUBLE_CLICK_TIME = None` to leave it alone.
 
 ## Finder keys, Windows style
 
@@ -120,6 +121,15 @@ Python doesn't have Accessibility permission. Check step 2, then restart the scr
 **Every tap is a double-click, or text gets selected by accident.**
 macOS **Tap to click** is still on, so each tap clicks twice. Turn it off.
 
+**Double-tapping a folder in Finder rarely opens it.**
+Your **Double-click speed** is too fast for taps. The script raises it automatically when it starts; then restart Finder once so it picks up the new value:
+
+```sh
+killall Finder
+```
+
+`--check` shows the current value on the `double-click:` line.
+
 **A tap right after typing doesn't click.**
 That's the palm guard. Wait a moment after typing, or lower `TYPING_COOLDOWN`.
 
@@ -160,6 +170,7 @@ All the timing and distance values are constants near the top of [instant_releas
 | `MULTI_MIN_FRAMES` | 3 | Frames (8 ms each) with two contacts before a touch counts as two-finger; filters phantom contacts |
 | `RIGHT_TAP_MAX_DURATION` | 0.25 s | Longest two-finger touch that still right-clicks |
 | `RIGHT_TAP_MAX_CENTROID_TRAVEL` | 0.03 | How far the midpoint between the two fingers may move during a two-finger tap |
+| `MIN_DOUBLE_CLICK_TIME` | 0.5 s | The system double-click speed is raised to at least this on start, so apps accept tap double-clicks. `None` leaves the system setting alone |
 
 After editing, run `python3 tests/test_gestures.py` (22 simulated-finger tests, nothing is posted to the system), then `./install.sh` again.
 

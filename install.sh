@@ -82,7 +82,7 @@ launchctl bootstrap "$DOMAIN" "$PLIST"
 REAL_PYTHON="$("$PYTHON" -c 'import os, sys; print(os.path.realpath(sys.executable))')"
 
 echo
-bold "Installed. Two one-time steps left:"
+bold "Installed. A few one-time steps left:"
 cat <<EOF
 
   A) Turn OFF the built-in tap features (they fight with this script):
@@ -99,6 +99,11 @@ cat <<EOF
      Make sure its switch is ON, then restart the agent:
 
        launchctl kickstart -k $DOMAIN/$LABEL
+
+  C) If double-tapping folders doesn't open them, restart Finder once
+     (killall Finder). The script raised the system double-click speed so
+     taps count as double-clicks; apps that were already open need a restart
+     to notice.
 
   Logs:      tail -f "$LOG"
   Uninstall: ./uninstall.sh
