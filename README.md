@@ -173,7 +173,7 @@ All the timing and distance values are constants near the top of [instant_releas
 | `RIGHT_TAP_MAX_CENTROID_TRAVEL` | 0.03 | How far the midpoint between the two fingers may move during a two-finger tap |
 | `MIN_DOUBLE_CLICK_TIME` | 0.5 s | The system double-click speed is raised to at least this on start, so apps accept tap double-clicks. `None` leaves the system setting alone |
 
-After editing, run `python3 tests/test_gestures.py && python3 tests/test_tap.py` (22 simulated-finger tests, nothing is posted to the system), then `./install.sh` again.
+After editing, run `python3 tests/test_gestures.py && python3 tests/test_tap.py` (simulated fingers and key events; nothing is posted to the system), then `./install.sh` again.
 
 ## How it works
 
