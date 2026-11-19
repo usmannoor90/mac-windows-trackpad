@@ -76,6 +76,18 @@ pg.failed = True
 pg.recover()
 check("then pauses the press guard", pg.retry_at > time.time() + 60)
 
+# Tap can't be recreated: counted once logged, so the main loop can restart.
+pg2 = m.PressGuard()
+pg2.finder_keys = None
+real_create = m.cg.CGEventTapCreate
+m.cg.CGEventTapCreate = lambda *a: None
+pg2.ever_worked = True
+for _ in range(m.TAP_RECREATE_FAILURES_BEFORE_RESTART):
+    pg2.start()
+check("failed recreations are counted for the restart",
+      pg2.create_failures == m.TAP_RECREATE_FAILURES_BEFORE_RESTART and pg2.ever_worked)
+m.cg.CGEventTapCreate = real_create
+
 # Stuck-drag protection.
 posted = []
 m.post_mouse_event = lambda t, loc, **k: posted.append(t)

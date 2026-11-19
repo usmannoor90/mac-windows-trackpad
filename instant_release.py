@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 log = logging.getLogger("instant_release")
 
@@ -271,6 +271,12 @@ FINDER_POLL_SECONDS = 0.1
 TAP_TIMEOUT_LIMIT = 2
 TAP_TIMEOUT_WINDOW = 120.0
 PRESS_GUARD_RETRY_SECONDS = 600.0
+# Seen in the wild: after macOS timed the tap out (an app such as Shortcuts
+# opening), the process could no longer create a tap *or* post clicks, while
+# a freshly started process could. If a tap that worked before can't be
+# recreated this many times in a row, the script exits and launchd
+# (KeepAlive) starts a fresh copy a few seconds later.
+TAP_RECREATE_FAILURES_BEFORE_RESTART = 3
 # While a finger is on the pad the trackpad reports ~125 frames a second. If
 # they stop mid-touch (a system dialog grabbed input, the device reset), the
 # lift will never arrive: after this long the touch is ended and any drag
@@ -953,6 +959,8 @@ class PressGuard:
         self.timeouts = []
         self.failed = False  # set by the tap thread, handled by the main loop
         self.retry_at = 0.0
+        self.create_failures = 0
+        self.ever_worked = False
         self._callback_ref = TAP_CALLBACK_TYPE(self._callback)  # keep alive
 
     def start(self):
@@ -968,8 +976,12 @@ class PressGuard:
             None,
         )
         if not self.port:
-            log.warning("press guard unavailable (event tap could not be created)")
+            self.create_failures += 1
+            if self.create_failures == 1:
+                log.warning("press guard unavailable (event tap could not be created)")
             return False
+        self.create_failures = 0
+        self.ever_worked = True
         self.failed = False
         self.timeouts = []
         threading.Thread(target=self._run, name="press-guard", daemon=True).start()
@@ -1117,6 +1129,19 @@ def main():
             and accessibility_trusted()
         ):
             press_guard.start()
+            if (
+                press_guard.ever_worked
+                and press_guard.create_failures >= TAP_RECREATE_FAILURES_BEFORE_RESTART
+            ):
+                log.warning(
+                    "event tap can't be recreated after macOS turned it off; "
+                    "restarting the script so clicks keep working"
+                )
+                with state_lock:
+                    for g in gestures.values():
+                        g.reset()
+                stop_devices()
+                sys.exit(75)  # launchd KeepAlive starts a fresh process
         last_tick = time.time()
         last_mono = time.monotonic()
 
